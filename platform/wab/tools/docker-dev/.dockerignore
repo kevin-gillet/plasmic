@@ -1,0 +1,2 @@
+# Ignore .git that can be very large and unused for final image
+.git

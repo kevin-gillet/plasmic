@@ -1,0 +1,47 @@
+services:
+  # PostgreSQL database
+  plasmic-db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: SEKRET
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./platform/wab/tools/docker-dev/db-setup.bash:/docker-entrypoint-initdb.d/db-setup.bash
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wab"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  # Plasmic WAB (Web App Builder)
+  plasmic-wab:
+    build:
+      context: .
+      dockerfile: platform/wab/tools/docker-dev/Dockerfile
+    ports:
+      - "3003:3003"
+    volumes:
+      # For development: mount source code for hot reloading
+      - .:/plasmic
+    depends_on:
+      plasmic-db:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=development
+      - DB_HOST=plasmic-db
+      - DB_PASSWORD=SEKRET
+      - DATABASE_URI=postgres://wab:SEKRET@plasmic-db:5432/wab
+      - WAB_DBPASSWORD=SEKRET
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

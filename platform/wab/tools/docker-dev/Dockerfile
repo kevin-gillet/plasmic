@@ -1,43 +1,72 @@
-FROM ubuntu:20.04
+# Build stage
+FROM node:18-alpine AS builder
 
-# Config
-ENV TZ=America/Los_Angeles
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+# Build arguments for configuration
+ARG DB_HOST
+ARG DB_PASSWORD
 
-# Install dependencies
+WORKDIR /plasmic
 
-# System setup
-RUN apt update
-RUN apt install -y sudo build-essential python3 python3-pip virtualenvwrapper git wget curl screen postgresql
+# Install essential build dependencies only
+RUN apk add --no-cache bash curl python3 py3-pip build-base
 
-## Node.js
-RUN curl -sL https://deb.nodesource.com/setup_14.x | sudo -E bash -
-RUN apt-get install -y nodejs
-RUN npm install -g yarn
-RUN npm install -g typescript
+# Optimize file watching for development
+RUN echo "fs.inotify.max_user_watches=524288" >> /etc/sysctl.conf && \
+    sysctl -p /etc/sysctl.conf || echo "Warning: Could not apply sysctl settings in container"
 
-## pip
-RUN pip3 install --upgrade git-review
-RUN pip3 install nodeenv
-RUN nodeenv -n 14.7.0 /root/.node/14.7.0/
+# Copy package files first to leverage Docker's cache layers
+COPY package.json yarn.lock ./
+COPY packages/*/package.json ./packages/
+COPY platform/*/package.json ./platform/
 
-# Entrypoint
-RUN echo "#!/bin/sh \n\
-echo "fs.inotify.max_user_watches before update" \n\
-cat /etc/sysctl.conf | grep fs.inotify \n\
-echo "______________________________________________updating inotify ____________________________________" \n\
-echo fs.inotify.max_user_watches=524288 | tee -a /etc/sysctl.conf && sysctl -p \n\
-echo "updated value is" \n\
-cat /etc/sysctl.conf | grep fs.inotify \n\
-exec bash \
-" >> /usr/local/bin/entrypoint.sh
+# Install global dependencies
+RUN npm install -g concurrently nx
+
+# Install dependencies (cached if package.json unchanged)
+RUN yarn install --frozen-lockfile
+
+# Now copy the rest of the code
+COPY . .
+
+# Configure database connection
+RUN sed -i "s/\"host\": \"localhost\"/\"host\": \"${DB_HOST}\"/g" platform/wab/ormconfig.json && \
+    grep -q '"password":' platform/wab/ormconfig.json || \
+    sed -i '/"database":/a \ "password": "'${DB_PASSWORD}'",' platform/wab/ormconfig.json
+
+# Run setup (build, etc.)
+RUN yarn setup-all && nx reset && \
+    chmod -R 777 /plasmic/node_modules/.cache || true
+
+# Runtime stage
+FROM node:18-alpine
+
+# Runtime dependencies only
+RUN apk add --no-cache bash curl postgresql-client
+
+# Install global dependencies
+RUN npm install -g concurrently
+
+# Create non-root user
+RUN addgroup -S plasmic && adduser -S plasmic -G plasmic
+USER plasmic
+
+WORKDIR /plasmic
+
+# Copy only what's needed from the build stage
+COPY --from=builder --chown=plasmic:plasmic /plasmic/node_modules /plasmic/node_modules
+COPY --from=builder --chown=plasmic:plasmic /plasmic/packages /plasmic/packages
+COPY --from=builder --chown=plasmic:plasmic /plasmic/platform /plasmic/platform
+COPY --from=builder --chown=plasmic:plasmic /plasmic/platform/wab/tools/docker-dev/secrets.json /home/plasmic/.plasmic
+
+# Create a better entrypoint script
+COPY --chown=plasmic:plasmic <<EOF /usr/local/bin/entrypoint.sh
+#!/bin/bash
+cd /plasmic
+echo "Starting development servers..."
+yarn dev
+EOF
+
 RUN chmod +x /usr/local/bin/entrypoint.sh
-RUN ln -s `which pip3` /usr/bin/pip
 
-# Secrets config
-ADD secrets.json /root/.plasmic/
-
-# Expose server port
 EXPOSE 3003
-
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
